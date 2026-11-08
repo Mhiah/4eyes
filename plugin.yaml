@@ -1,0 +1,15 @@
+manifest_version: 2
+name: 4eyes
+version: 0.1.0
+description: "The four-eyes rule for AI agents: no crypto leaves your wallet without a second pair of eyes. Watches every tool call from any plugin, MCP server or terminal command and holds transfers, unlimited token approvals, permit signatures and marketplace orders that look wrong: addresses that came from an email or web page instead of from you, lookalike (poisoned) addresses, changed payee details, more than you asked for, over your limits. Only you can release a hold, with /4eyes approve. Freeze everything with /4eyes freeze. Local: no network calls, no keys."
+author: "Mhiah"
+license: MIT
+requires_hermes: ">=0.22.7"
+tags: [security, crypto, wallet, payments, guardrails, prompt-injection, web3]
+provides_tools:
+  - foureyes_check
+  - foureyes_status
+provides_hooks:
+  - pre_llm_call
+  - post_tool_call
+  - pre_tool_call

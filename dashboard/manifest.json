@@ -1,0 +1,9 @@
+{
+  "name": "4eyes",
+  "label": "4eyes",
+  "description": "No crypto leaves your wallet without a second pair of eyes.",
+  "version": "0.1.0",
+  "tab": { "hidden": true },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}
