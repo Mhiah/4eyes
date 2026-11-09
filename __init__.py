@@ -151,6 +151,50 @@ def _status_dict() -> dict:
             "limits": _STORE.limits()}
 
 
+# --- demo wallet (opt-in: /4eyes demo on) ---------------------------------------------------------------
+# A pretend wallet so anyone can see 4eyes work without a real wallet plugin. It moves no money: it only
+# reports what a real wallet would have sent. 4eyes guards it exactly like any other wallet tool.
+
+DEMO_SEND_SCHEMA = {
+    "name": "demo_wallet_send",
+    "description": ("4eyes DEMO wallet (simulated, no real funds). Send a token to an address. Use this "
+                    "whenever the user asks to pay or send crypto while demo mode is on."),
+    "parameters": {"type": "object", "properties": {
+        "to": {"type": "string", "description": "Recipient wallet address (0x… or Solana)."},
+        "amount": {"type": "number", "description": "Amount in whole tokens, e.g. 0.02"},
+        "token": {"type": "string", "description": "Token symbol, e.g. ETH, USDC, SOL"}},
+        "required": ["to", "amount", "token"]},
+}
+
+DEMO_TX_SCHEMA = {
+    "name": "demo_wallet_send_transaction",
+    "description": ("4eyes DEMO wallet (simulated, no real funds). Sign and send a raw EVM transaction, "
+                    "e.g. a contract call a dapp or web page asks for."),
+    "parameters": {"type": "object", "properties": {
+        "to": {"type": "string", "description": "Contract address"},
+        "data": {"type": "string", "description": "0x-prefixed calldata"},
+        "value": {"type": "string", "description": "Native value in wei, default 0"}},
+        "required": ["to", "data"]},
+}
+
+
+def _demo_on() -> bool:
+    try:
+        return bool(_STORE.settings().get("demo"))
+    except Exception:
+        return False
+
+
+def tool_demo_send(args: dict, **kwargs: Any) -> str:
+    return json.dumps({"simulated": True, "status": "sent (demo wallet, no real funds moved)",
+                       "to": args.get("to"), "amount": args.get("amount"), "token": args.get("token")})
+
+
+def tool_demo_tx(args: dict, **kwargs: Any) -> str:
+    return json.dumps({"simulated": True, "status": "transaction sent (demo wallet, no real funds moved)",
+                       "to": args.get("to"), "data": (args.get("data") or "")[:74]})
+
+
 # --- /4eyes (typed by the human; never callable by the model) -----------------------------------------
 
 HELP = """4eyes: no crypto leaves without a second pair of eyes
@@ -165,7 +209,8 @@ HELP = """4eyes: no crypto leaves without a second pair of eyes
   /4eyes limit <TOKEN> <per_payment|off> [per_day]
   /4eyes newpayees hold|allow    hold the first payment to an address you typed (default: hold)
   /4eyes cooldown <minutes>      wait this long before a new payee's approval can be used
-  /4eyes log                     recent decisions"""
+  /4eyes log                     recent decisions
+  /4eyes demo on|off             add a pretend wallet (no real funds) to try 4eyes"""
 
 
 def _fmt_status() -> str:
@@ -268,6 +313,13 @@ def handle_command(raw_args: str = "", **kwargs: Any) -> str:
         except ValueError:
             return "Usage: /4eyes cooldown <minutes>"
         return f"New payees: approvals usable after {rest[0]} minute(s)."
+    if cmd == "demo" and rest and rest[0] in ("on", "off"):
+        _STORE.set_setting("demo", rest[0] == "on")
+        if rest[0] == "on":
+            return ("Demo wallet ON: Hermes now has demo_wallet_send and demo_wallet_send_transaction. They are "
+                    "pretend wallets that move no real funds, and 4eyes guards them like real ones. Start a new "
+                    "chat, then ask Hermes to pay someone. /4eyes demo off removes them.")
+        return "Demo wallet OFF."
     if cmd == "log":
         rows = _STORE.ledger(15)
         if not rows:
@@ -283,6 +335,10 @@ def register(ctx) -> None:
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
     ctx.register_tool(name="foureyes_check", toolset="4eyes", schema=CHECK_SCHEMA, handler=tool_check)
     ctx.register_tool(name="foureyes_status", toolset="4eyes", schema=STATUS_SCHEMA, handler=tool_status)
+    ctx.register_tool(name="demo_wallet_send", toolset="4eyes", schema=DEMO_SEND_SCHEMA,
+                      handler=tool_demo_send, check_fn=_demo_on)
+    ctx.register_tool(name="demo_wallet_send_transaction", toolset="4eyes", schema=DEMO_TX_SCHEMA,
+                      handler=tool_demo_tx, check_fn=_demo_on)
     ctx.register_command("4eyes", handler=handle_command,
                          description="Approve or reject held payments, freeze, trusted payees, limits",
-                         args_hint="[holds|approve <id>|reject <id>|freeze|trust <name> <addr>|log|help]")
+                         args_hint="[holds|approve <id>|reject <id>|freeze|trust <name> <addr>|demo on|log|help]")

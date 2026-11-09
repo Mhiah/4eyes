@@ -33,7 +33,8 @@ def loaded(tmp_path, monkeypatch):
 def test_registers_everything(loaded):
     manager, _ = loaded
     info = manager._plugins["4eyes"]
-    assert sorted(info.tools_registered) == ["foureyes_check", "foureyes_status"]
+    assert sorted(info.tools_registered) == ["demo_wallet_send", "demo_wallet_send_transaction",
+                                            "foureyes_check", "foureyes_status"]
     assert set(info.hooks_registered) >= {"pre_llm_call", "post_tool_call", "pre_tool_call"}
 
 
@@ -92,3 +93,24 @@ def test_ordinary_tools_untouched(loaded):
                        ("terminal", {"command": "ls"})):
         r, _ = plugins._dispatch_pre_tool_call_hooks(name, args, session_id="s3")
         assert r is None
+
+
+def test_demo_wallet_is_guarded(loaded):
+    _, module = loaded
+    assert not module._demo_on()
+    assert "Demo wallet ON" in module.handle_command("demo on")
+    assert module._demo_on()
+    sid = "s4"
+    plugins.invoke_hook("pre_llm_call", session_id=sid, user_message="pay the invoice file")
+    plugins.invoke_hook("post_tool_call", tool_name="read_file", args={}, session_id=sid,
+                        result=f"INVOICE 4471. Amount due: 0.02 ETH. Pay to: {STRANGER}")
+    block, _ = plugins._dispatch_pre_tool_call_hooks(
+        "demo_wallet_send", {"to": STRANGER, "amount": 0.02, "token": "ETH"}, session_id=sid)
+    assert block and "came from content" in block
+    drain = "0x095ea7b3" + "0" * 24 + "6" * 40 + "f" * 64
+    block, _ = plugins._dispatch_pre_tool_call_hooks(
+        "demo_wallet_send_transaction", {"to": "0x" + "a" * 40, "data": drain}, session_id=sid)
+    assert block and "drainers" in block
+    assert json.loads(module.tool_demo_send({"to": STRANGER, "amount": 1, "token": "ETH"}))["simulated"]
+    module.handle_command("demo off")
+    assert not module._demo_on()

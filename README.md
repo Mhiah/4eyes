@@ -66,6 +66,17 @@ Restart Hermes (or the gateway). Then add the people you pay:
 /4eyes trust Ade 0x1111aaaa0000000000000000000000000000c0de
 ```
 
+## Try it without a wallet
+
+```
+/4eyes demo on
+```
+
+This adds a pretend wallet to Hermes (`demo_wallet_send` and `demo_wallet_send_transaction`). It moves
+no real money; it only reports what a real wallet would have sent. 4eyes guards it exactly like a real
+wallet, so you can watch every check: trust a payee, then ask Hermes to pay an invoice from a file, pay a
+lookalike address, or "claim an airdrop" with an unlimited approval. `/4eyes demo off` removes it.
+
 ## Where it works
 
 4eyes runs inside Hermes, so it guards every surface Hermes serves. Install once; every surface uses
@@ -102,6 +113,7 @@ the same payees, limits and holds.
 /4eyes newpayees hold|allow    hold the first payment to an address you typed (default: hold)
 /4eyes cooldown <minutes>      wait this long before a new payee's approval can be used
 /4eyes log                     recent decisions
+/4eyes demo on|off             add a pretend wallet (no real funds) to try 4eyes
 ```
 
 ## Agent tools (read-only)
@@ -111,7 +123,8 @@ the same payees, limits and holds.
 | `foureyes_check` | Dry run: would this planned payment pass? Lists the reasons it would be held. Creates no hold. |
 | `foureyes_status` | Frozen or not, payments waiting for you, trusted payees, limits. |
 
-Neither tool can approve, trust or change anything.
+Neither tool can approve, trust or change anything. With `/4eyes demo on`, Hermes also gets the two
+pretend wallet tools above (hidden otherwise).
 
 ## How it works
 
