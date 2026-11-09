@@ -128,6 +128,9 @@ def assess(act: MoneyAction, store: Store, prov: dict) -> list[Reason]:
             reasons.append(Reason("changed", f"You asked to pay {p.get('label', named[0])}, whose saved address is "
                                   f"{chain.short(p['address'])}, but this goes to {chain.short(r)}. Changed payment "
                                   "details are the classic invoice-fraud move.", CRITICAL))
+            if rl in content_addrs and rl not in user_addrs:
+                reasons.append(Reason("injected", f"{chain.short(r)} came from content Hermes read (an email, "
+                                      "web page, file or tool result), not from you.", CRITICAL))
             continue
         if rl in user_addrs:
             if settings.get("hold_new_payees", True) and act.kind in ("transfer", "payment", "approve"):

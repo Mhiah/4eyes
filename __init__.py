@@ -38,7 +38,9 @@ def _notify(event: str, payload: dict[str, Any]) -> None:
 
 
 def _cid(kwargs: dict) -> str:
-    for k in ("conversation_id", "session_id", "task_id"):
+    # session_id is the one id every hook gets (pre_llm_call has no conversation_id), so it keys
+    # "what the user typed" and "what tools returned" to the same conversation.
+    for k in ("session_id", "conversation_id", "task_id"):
         v = kwargs.get(k)
         if v:
             return str(v)
