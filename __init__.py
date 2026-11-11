@@ -5,6 +5,8 @@ Hermes surfaces used (all public):
   post_tool_call  remember addresses that only showed up in content Hermes read (emails, pages, files)
   pre_tool_call   inspect every tool call; hold or refuse payments, approvals and signatures that look wrong
   /4eyes          approve or reject holds, freeze everything, manage trusted payees and limits (human only)
+  approve action  when a person is there to answer, a held payment is put to them through Hermes' own approval
+                  prompt (one tap, the model cannot answer it); otherwise it is blocked until /4eyes approve
   tools           foureyes_check (dry run) and foureyes_status (read-only); the model can never approve
 """
 
@@ -14,11 +16,13 @@ import json
 import logging
 import re
 import shlex
+import time
 from typing import Any, Optional
+from urllib.parse import unquote
 
 from .foureyes import chain
 from .foureyes.detect import detect
-from .foureyes.guard import Provenance, evaluate
+from .foureyes.guard import Provenance, _spend, evaluate, fingerprint
 from .foureyes.store import PLUGIN_ID, Store
 
 logger = logging.getLogger(__name__)
@@ -61,6 +65,10 @@ def _on_post_tool_call(tool_name: str = "", result: Any = "", **kwargs: Any):
     if tool_name in _OWN_TOOLS:
         return None
     try:
+        _settle_one_tap(tool_name, kwargs.get("args"), result, kwargs)
+    except Exception:
+        logger.debug("4eyes: could not settle a one-tap approval", exc_info=True)
+    try:
         text = result if isinstance(result, str) else json.dumps(result, default=str)
         _PROV.note_content(_cid(kwargs), text)
     except Exception:
@@ -68,18 +76,89 @@ def _on_post_tool_call(tool_name: str = "", result: Any = "", **kwargs: Any):
     return None
 
 
-_TAMPER = re.compile(r"(plugin-data[\\/]+4eyes|/api/plugins/4eyes|/4eyes\s+(approve|unfreeze|trust|untrust|limit|"
-                     r"newpayees|cooldown|reject))", re.I)
+_COMMANDS = re.compile(r"/4eyes\s+(approve|unfreeze|trust|untrust|limit|newpayees|cooldown|reject|unpriced|onetap)")
+_BACKEND = re.compile(r"/api/plugins/4eyes")
+_OWN_CODE = re.compile(r"plugins/*4eyes")
+_PLUGIN_ADMIN = re.compile(r"plugins\s+(disable|remove|uninstall|rm|update|install|reinstall)\b[^\n;&|]*4eyes|"
+                           r"config\s+set\s+plugins\.")
+_DESTRUCTIVE = re.compile(r"\b(rm|mv|shred|truncate|unlink|rmdir|rsync|chmod|chown|tee|dd|cp)\b|"
+                          r"plugin-data/\S*[*?\[{]")
+_READERS = {"read_file", "search_files", "list_files", "list_directory", "glob", "grep"}
+
+
+def _flatten(args: Any) -> str:
+    """One lower-case string of everything in the call, with the cheap disguises removed: URL-encoding
+    (/api/plugins/%34eyes) and quotes or backslashes dropped into the middle of a word (4ey""es)."""
+    try:
+        blob = json.dumps(args, default=str, ensure_ascii=False)
+    except (TypeError, ValueError):
+        blob = str(args)
+    for _ in range(2):
+        blob = unquote(blob)
+    return re.sub(r"[\"'`\\^]", "", blob).lower()
 
 
 def _tampering(tool_name: str, args: Any) -> bool:
     """The model must never release its own payment: no running /4eyes through a nested Hermes, no calling
-    the pane's backend, no editing 4eyes' files."""
+    the pane's backend, no touching 4eyes' data or code, no switching the plugin off. This is a tripwire for
+    an agent that has been talked into it, not a sandbox: see "What 4eyes cannot see" in the README."""
+    blob = _flatten(args)
+    if _COMMANDS.search(blob) or _BACKEND.search(blob) or _PLUGIN_ADMIN.search(blob):
+        return True
+    if (tool_name or "").lower() in _READERS:
+        return False                                    # reading is harmless: hold ids are no secret
+    if _OWN_CODE.search(blob):
+        return True
+    return "plugin-data" in blob and ("4eyes" in blob or bool(_DESTRUCTIVE.search(blob)))
+
+
+def _one_tap_ready(codes: list[str]) -> bool:
+    """True only when Hermes' approval prompt will really reach a person. With approvals off, in yolo
+    mode, under smart (model-judged) approvals, or with nobody at the other end, that prompt can pass
+    without a human, so 4eyes keeps to its own hold and /4eyes approve. Any doubt means False."""
+    settings = _STORE.settings()
+    if not settings.get("one_tap", True):
+        return False
+    if float(settings.get("cooldown_minutes", 0)) > 0 and {"new", "unknown", "unreadable"} & set(codes):
+        return False                                    # a cooling-off period cannot be tapped through
     try:
-        blob = json.dumps(args, default=str)
-    except (TypeError, ValueError):
-        blob = str(args)
-    return bool(_TAMPER.search(blob))
+        # Hermes has no public "will a person answer?" call yet, so this reads its approval module. If a
+        # release moves any of it, the except below turns one-tap off and 4eyes blocks as before.
+        from tools import approval
+        if approval._yolo_active() or approval.approval_context._get_approval_mode() != "manual":
+            return False
+        _callback, is_cli, is_gateway, is_ask = approval._presence(None)
+        return bool(is_cli or is_gateway or is_ask)
+    except Exception:
+        return False
+
+
+def _settle_one_tap(tool_name: str, args: Any, result: Any, kwargs: dict) -> None:
+    """After a call 4eyes sent to Hermes' approval prompt: if it ran, the user said yes, so use the hold up
+    and count the spend; if the user said no, mark it rejected."""
+    if not isinstance(args, dict):
+        return
+    hold = _STORE.asked_hold(fingerprint(tool_name, args), str(kwargs.get("tool_call_id") or ""))
+    if not hold:
+        return
+    status, text = kwargs.get("status"), result if isinstance(result, str) else ""
+    blocked = status == "blocked" or (status is None and text.lstrip().startswith("BLOCKED"))
+    if blocked:
+        if "User denied" in text:
+            _STORE.decide(hold["id"], "rejected", "user:hermes")
+            _STORE.log({"outcome": "blocked", "summary": hold["summary"], "reasons": ["rejected"], "hold": hold["id"]})
+            _notify("decided", {"hold": hold["id"], "status": "rejected"})
+        return
+    _STORE.decide(hold["id"], "approved", "user:hermes")
+    hold = _STORE.holds().get(hold["id"]) or hold
+    hold["status"], hold["used_at"] = "used", time.time()
+    _STORE.put_hold(hold)
+    act = detect(tool_name, args)
+    if act is not None:
+        _spend(act, _STORE)
+    _STORE.log({"outcome": "approved", "summary": hold["summary"],
+                "reasons": [r["code"] for r in hold.get("reasons", [])], "hold": hold["id"]})
+    _notify("decided", {"hold": hold["id"], "status": "used"})
 
 
 def _on_pre_tool_call(tool_name: str = "", args: Optional[dict] = None, **kwargs: Any):
@@ -100,6 +179,14 @@ def _on_pre_tool_call(tool_name: str = "", args: Optional[dict] = None, **kwargs
         return None
     _notify("held" if verdict.status == "hold" else "blocked",
             {"summary": act.summary(), "hold": verdict.hold_id, "reasons": [r.text for r in verdict.reasons]})
+    if verdict.status == "hold" and verdict.hold_id and verdict.askable \
+            and _one_tap_ready([r.code for r in verdict.reasons]):
+        asked = _STORE.mark_asked(verdict.hold_id, str(kwargs.get("tool_call_id") or ""))
+        if asked:
+            why = " ".join(r.text for r in verdict.reasons)
+            # A fresh key every time: "always allow" on this prompt can never cover a later payment.
+            return {"action": "approve", "rule_key": f"4eyes:{verdict.hold_id}:{asked}",
+                    "message": f"4eyes held this: {act.summary()}. {why}"[:600]}
     return {"action": "block", "message": verdict.message}
 
 
@@ -211,6 +298,8 @@ HELP = """4eyes: no crypto leaves without a second pair of eyes
   /4eyes limit <TOKEN> <per_payment|off> [per_day]
   /4eyes newpayees hold|allow    hold the first payment to an address you typed (default: hold)
   /4eyes cooldown <minutes>      wait this long before a new payee's approval can be used
+  /4eyes unpriced hold|allow     hold payments whose token or amount 4eyes cannot work out (default: hold)
+  /4eyes onetap on|off           ask through Hermes' own approval prompt when a person is there (default: on)
   /4eyes log                     recent decisions
   /4eyes demo on|off             add a pretend wallet (no real funds) to try 4eyes"""
 
@@ -309,6 +398,13 @@ def handle_command(raw_args: str = "", **kwargs: Any) -> str:
     if cmd == "newpayees" and rest and rest[0] in ("hold", "allow"):
         _STORE.set_setting("hold_new_payees", rest[0] == "hold")
         return f"First payments to addresses you typed: {rest[0]}."
+    if cmd == "unpriced" and rest and rest[0] in ("hold", "allow"):
+        _STORE.set_setting("hold_unpriced", rest[0] == "hold")
+        return f"Payments 4eyes cannot price: {rest[0]}."
+    if cmd == "onetap" and rest and rest[0] in ("on", "off"):
+        _STORE.set_setting("one_tap", rest[0] == "on")
+        return ("Held payments are put to you through Hermes' approval prompt when you are there to answer."
+                if rest[0] == "on" else "Held payments wait for /4eyes approve <id>.")
     if cmd == "cooldown" and rest:
         try:
             _STORE.set_setting("cooldown_minutes", max(0.0, float(rest[0])))

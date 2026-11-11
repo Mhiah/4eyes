@@ -31,6 +31,7 @@ class Verdict:
     reasons: list[Reason] = field(default_factory=list)
     hold_id: Optional[str] = None
     message: str = ""
+    askable: bool = False               # a hold the user has not answered yet (not a cooling-off wait)
 
 
 # --- what the user said vs what came from content --------------------------------------------------
@@ -96,6 +97,20 @@ def assess(act: MoneyAction, store: Store, prov: dict) -> list[Reason]:
     content_addrs = {a.lower() for a in prov.get("content", set())}
     settings = store.settings()
 
+    # Things 4eyes cannot read are never waved through.
+    if act.opaque:
+        reasons.append(Reason("opaque", f"Hermes is being asked to sign {act.opaque}. 4eyes cannot read what it "
+                              "does, and signing something you cannot read is how drainer sites empty wallets.",
+                              CRITICAL))
+    if act.script:
+        reasons.append(Reason("script", "This runs code that signs or sends a transaction by itself, outside any "
+                              "wallet tool, so 4eyes cannot see the whole payment.", HIGH))
+    if act.unreadable and not act.recipients and act.kind in ("transfer", "payment", "approve", "approve_all",
+                                                              "permit"):
+        reasons.append(Reason("unreadable", f'The recipient is "{act.unreadable[0][:60]}", a name and not a wallet '
+                              "address, so 4eyes cannot check who gets paid. Approve it only if you know where that "
+                              "name points, or ask Hermes to use the address.", HIGH))
+
     # Unlimited approvals, approve-all and permits: the way wallets are actually drained.
     if act.kind in ("approve", "approve_all", "permit") and act.unlimited:
         for sp in act.recipients or ["(unknown)"]:
@@ -150,17 +165,27 @@ def assess(act: MoneyAction, store: Store, prov: dict) -> list[Reason]:
             reasons.append(Reason("intent", f"You asked for {max(asked):g} {act.token or ''}".rstrip() +
                                   f", this sends {act.amount:g}.", CRITICAL))
 
-    # Limits.
-    if act.amount is not None and act.token and act.kind in ("transfer", "payment", "swap"):
-        lim = store.limits().get(act.token.upper())
-        if lim:
+    # Limits. A payment 4eyes cannot price has no limit to pass, so it waits for the user instead.
+    if act.kind in ("transfer", "payment", "swap"):
+        bucket = chain.limit_token(act.token)
+        lim = store.limits().get(bucket) if bucket else None
+        if act.amount is not None and lim is not None and not act.unpriced:
             if lim.get("per_tx") is not None and act.amount > lim["per_tx"]:
                 reasons.append(Reason("limit", f"{act.amount:g} {act.token} is over your per-payment limit of "
                                       f"{lim['per_tx']:g}.", HIGH))
-            today = store.spent_today(act.token)
+            today = store.spent_today(bucket)
             if lim.get("per_day") is not None and today + act.amount > lim["per_day"]:
-                reasons.append(Reason("daily", f"This would bring today's {act.token} total to "
+                reasons.append(Reason("daily", f"This would bring today's {bucket} total to "
                                       f"{today + act.amount:g}, over your daily limit of {lim['per_day']:g}.", HIGH))
+        elif settings.get("hold_unpriced", True):
+            if not bucket or act.unpriced == "token":
+                why = "4eyes cannot tell which token this moves, so your limits cannot be checked."
+            elif act.amount is None or act.unpriced:
+                why = f"4eyes cannot tell how much {act.token} this moves, so your limits cannot be checked."
+            else:
+                why = (f"You have no limit for {bucket}. Set one with /4eyes limit {bucket} <per_payment> [per_day], "
+                       f"or /4eyes limit {bucket} off to stop asking.")
+            reasons.append(Reason("unpriced", why, HIGH))
     return reasons
 
 
@@ -195,7 +220,7 @@ def evaluate(act: MoneyAction, args: Any, store: Store, prov: dict, *, session: 
     cool = float(settings.get("cooldown_minutes", 0)) * 60
     for h in store.holds().values():
         if h["fingerprint"] == fp and h["status"] == "approved" and now - h.get("decided_at", 0) <= window:
-            if now - h["created"] < cool and any(r.code in ("new", "unknown") for r in reasons):
+            if now - h["created"] < cool and any(r.code in ("new", "unknown", "unreadable") for r in reasons):
                 left = int((cool - (now - h["created"])) / 60) + 1
                 return Verdict("hold", reasons, h["id"], f"4eyes: approved, but this is a new payee and the "
                                f"cooling-off period has {left} more minute(s). Tell the user and wait.")
@@ -206,7 +231,7 @@ def evaluate(act: MoneyAction, args: Any, store: Store, prov: dict, *, session: 
                        "hold": h["id"]})
             return Verdict("allow", reasons, h["id"])
         if h["fingerprint"] == fp and h["status"] == "held":
-            return Verdict("hold", reasons, h["id"], _message(act, reasons, h["id"]))
+            return Verdict("hold", reasons, h["id"], _message(act, reasons, h["id"]), askable=True)
         if h["fingerprint"] == fp and h["status"] == "rejected" and now - h.get("decided_at", 0) <= window:
             return Verdict("block", reasons, h["id"], f"4eyes: the user REJECTED this payment (hold {h['id']}). "
                            "Do not try again.")
@@ -217,9 +242,10 @@ def evaluate(act: MoneyAction, args: Any, store: Store, prov: dict, *, session: 
                     "amount": act.amount, "token": act.token, "unlimited": act.unlimited,
                     "reasons": [{"code": r.code, "text": r.text, "severity": r.severity} for r in reasons]})
     store.log({"outcome": "held", "summary": act.summary(), "reasons": [r.code for r in reasons], "hold": hold_id})
-    return Verdict("hold", reasons, hold_id, _message(act, reasons, hold_id))
+    return Verdict("hold", reasons, hold_id, _message(act, reasons, hold_id), askable=True)
 
 
 def _spend(act: MoneyAction, store: Store) -> None:
-    if act.amount is not None and act.token and act.kind in ("transfer", "payment", "swap"):
-        store.add_spend(act.token, act.amount)
+    bucket = chain.limit_token(act.token)
+    if act.amount is not None and bucket and act.kind in ("transfer", "payment", "swap"):
+        store.add_spend(bucket, act.amount)

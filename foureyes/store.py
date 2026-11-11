@@ -15,8 +15,10 @@ DEFAULT_LIMITS = {
     "DAI": {"per_tx": 100.0, "per_day": 500.0},
     "ETH": {"per_tx": 0.05, "per_day": 0.2},
     "SOL": {"per_tx": 1.0, "per_day": 5.0},
+    "USD": {"per_tx": 100.0, "per_day": 500.0},      # x402 / MPP payments priced in dollars
 }
-DEFAULT_SETTINGS = {"frozen": False, "hold_new_payees": True, "approval_minutes": 15, "cooldown_minutes": 0}
+DEFAULT_SETTINGS = {"frozen": False, "hold_new_payees": True, "hold_unpriced": True, "one_tap": True,
+                    "approval_minutes": 15, "cooldown_minutes": 0}
 LEDGER_MAX = 200
 
 
@@ -170,6 +172,30 @@ class Store:
             h["status"], h["decided_at"], h["decided_by"] = status, time.time(), by
             self._save("holds")
             return h
+
+    def mark_asked(self, hold_id: str, call_id: str = "") -> int:
+        """Record that this hold was put to the user through Hermes' approval prompt. Returns how many
+        times it has been asked (0 if the hold is gone or already answered)."""
+        with self._lock:
+            h = self.holds().get(hold_id)
+            if not h or h["status"] != "held":
+                return 0
+            h["asked"], h["asked_at"], h["asked_call"] = int(h.get("asked", 0)) + 1, time.time(), call_id
+            self._save("holds")
+            return h["asked"]
+
+    def asked_hold(self, fp: str, call_id: str = "", within: float = 3600.0) -> Optional[dict]:
+        """The hold that was put to the user for exactly this call, if any."""
+        now = time.time()
+        for h in self.holds().values():
+            if h.get("fingerprint") != fp or not h.get("asked") or h["status"] not in ("held", "approved"):
+                continue
+            if now - h.get("asked_at", 0) > within:
+                continue
+            if call_id and h.get("asked_call") and h["asked_call"] != call_id:
+                continue
+            return h
+        return None
 
     # --- ledger ------------------------------------------------------------------------------------
     def log(self, entry: dict) -> None:
