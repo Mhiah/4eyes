@@ -22,6 +22,9 @@ hermes  →  wallet_send(recipient=0x7777…7777, amount=40, token=USDC)
            Only you can release it: /4eyes approve 3fa2c1  or  /4eyes reject 3fa2c1
 ```
 
+When you are there to answer, the same hold arrives as Hermes' own approval prompt (a card in Desktop,
+buttons in Telegram, a prompt in the terminal): one tap, and the payment goes through or stops.
+
 ## What it catches
 
 | Attack | How 4eyes sees it |
@@ -31,12 +34,17 @@ hermes  →  wallet_send(recipient=0x7777…7777, amount=40, token=USDC)
 | **Changed payment details** | You asked to pay a saved payee ("pay Ade"), but the money is going to a different address. |
 | **Wallet drainers** | Unlimited token approvals, `setApprovalForAll`, ERC-2612 and Permit2 permit signatures and marketplace order signatures, decoded from raw calldata and EIP-712 data, even when the tool call just says "send transaction". |
 | **More than you asked** | You said 50 USDC, the call sends 90. |
-| **Limits** | Per-payment and per-day limits per token (defaults: USDC/USDT/DAI 100/500, ETH 0.05/0.2, SOL 1/5). |
+| **Limits** | Per-payment and per-day limits per token (defaults: USDC/USDT/DAI 100/500, ETH 0.05/0.2, SOL 1/5, dollar-priced x402/MPP payments 100/500). They apply whether the tool names the token by symbol or by contract address, and to raw `transfer` calldata. WETH spends the ETH limit. |
+| **Payments it cannot price** | An amount it cannot read exactly, a token contract it does not know, or a token you have set no limit for. These wait for you instead of passing (`/4eyes limit <TOKEN> off` or `/4eyes unpriced allow` to stop asking). |
+| **Recipients it cannot read** | The recipient is a name (`attacker.eth`, "Bob") and not an address, so the wallet decides who gets paid. 4eyes holds it. |
+| **Signatures it cannot read** | A pre-built transaction, a raw hash (`eth_sign`), or EIP-712 data it has no rule for. This is how drainer sites work, so signing waits for you. Plain-text login messages pass. |
+| **Code that pays by itself** | `execute_code`, `python -c` or `node -e` that signs or sends a transaction without a wallet tool. |
 | **Strangers** | First payment to an address that isn't a trusted payee (you can turn this off for addresses you typed). |
-| **The agent approving itself** | Tool calls that try to run `/4eyes approve` through a nested Hermes, call the pane's backend or edit 4eyes' files are refused. |
+| **The agent approving itself** | Tool calls that try to run `/4eyes approve` through a nested Hermes, call the pane's backend, touch 4eyes' data or code, or disable, remove or reinstall the plugin are refused. |
 
 It recognises transfers, swaps, approvals, permits, raw transactions and paid requests from any
-tool by name and arguments, plus `cast send`, `solana transfer` and `spl-token` terminal commands.
+tool by name and arguments (`send_token`, `sendTransaction`, viem-style `functionName` + `args`), plus
+`cast send`, `solana transfer` and `spl-token` terminal commands.
 
 ## Why this is a plugin, not a prompt
 
@@ -48,8 +56,11 @@ sits outside the model:
    believe anything.
 2. **It reads the transaction, not the description.** A drainer's "claim airdrop" call is an
    unlimited `approve` in hex. 4eyes decodes it.
-3. **Only a human can release a hold.** Holds are released by `/4eyes approve` (typed by you) or the
-   Desktop pane, never by a tool. YOLO mode, auto-approve and smart approval can't release them.
+3. **Only a human can release a hold.** Holds are released by you: on Hermes' approval prompt, with
+   `/4eyes approve`, or in the Desktop pane. Never by a tool. 4eyes uses Hermes' prompt only when it
+   will reach a person: with approvals off, in YOLO mode, under smart (model-judged) approvals, or in
+   a job nobody is watching, it blocks and waits for `/4eyes approve` instead, so none of those can
+   release a hold.
 4. **Approvals are single-use and exact.** An approval covers that exact call, once, for 15 minutes.
    Change one digit and it's a new hold.
 
@@ -84,9 +95,9 @@ the same payees, limits and holds.
 
 | Surface | How to use it |
 |---|---|
-| **Terminal (CLI / TUI)** | Run `hermes`. Held payments show the reason and the hold id; type `/4eyes approve <id>` or `/4eyes reject <id>`. |
-| **Hermes Desktop** | Same commands. Turn on the plugin's Desktop half under **Capabilities → Plugins → 4eyes** for the status-bar chip (*4eyes: guarding / 2 waiting / FROZEN*) and the 4eyes pane: waiting payments with **Approve once** / **Reject**, a **Freeze** button, trusted payees, limits and recent decisions. |
-| **Telegram, Discord, Slack, WhatsApp and other messaging apps** | Connect the app with `hermes gateway setup`, start the gateway, and message your bot. `/4eyes` works there and appears in Telegram's command menu, so you can approve or freeze from your phone. |
+| **Terminal (CLI / TUI)** | Run `hermes`. A held payment shows the reason and asks you on the spot. With `/4eyes onetap off`, or when Hermes' approvals are not on manual, it shows the hold id and you type `/4eyes approve <id>` or `/4eyes reject <id>`. |
+| **Hermes Desktop** | The same prompt as an approval card. Turn on the plugin's Desktop half under **Capabilities → Plugins → 4eyes** for the status-bar chip (*4eyes: guarding / 2 waiting / FROZEN*) and the 4eyes pane: waiting payments with **Approve once** / **Reject**, a **Freeze** button, trusted payees, limits and recent decisions. |
+| **Telegram, Discord, Slack, WhatsApp and other messaging apps** | Connect the app with `hermes gateway setup`, start the gateway, and message your bot. Held payments arrive as approval buttons, and `/4eyes` appears in Telegram's command menu, so you can approve or freeze from your phone. |
 | **Scheduled jobs and automations** | Payments made by cron jobs or automations hit the same checks. Nobody is there to approve, so suspicious ones simply wait for you. |
 | **Every wallet plugin** | 4eyes doesn't replace your wallet plugin; it stands in front of all of them at once, including MCP servers and terminal tools. |
 
@@ -112,6 +123,8 @@ the same payees, limits and holds.
 /4eyes limit <TOKEN> <per_payment|off> [per_day]
 /4eyes newpayees hold|allow    hold the first payment to an address you typed (default: hold)
 /4eyes cooldown <minutes>      wait this long before a new payee's approval can be used
+/4eyes unpriced hold|allow     hold payments whose token or amount 4eyes cannot work out (default: hold)
+/4eyes onetap on|off           ask through Hermes' own approval prompt when a person is there (default: on)
 /4eyes log                     recent decisions
 /4eyes demo on|off             add a pretend wallet (no real funds) to try 4eyes
 ```
@@ -131,11 +144,26 @@ pretend wallet tools above (hidden otherwise).
 | Hermes surface | Use |
 |---|---|
 | `pre_llm_call` hook | Records the addresses, amounts and payee names you typed in this conversation. |
-| `post_tool_call` hook | Records addresses that appeared in tool output (emails, pages, files). |
-| `pre_tool_call` hook | Detects money actions, decodes calldata and EIP-712 data, applies the rules, holds or refuses. If 4eyes ever errors, Hermes fails closed and blocks the call. |
+| `post_tool_call` hook | Records addresses that appeared in tool output (emails, pages, files). Also closes a hold you answered on Hermes' prompt and counts it against the day's limit. |
+| `pre_tool_call` hook | Detects money actions, decodes calldata and EIP-712 data and applies the rules. A hold returns `approve` (Hermes' human approval prompt, with a fresh `rule_key` each time so "always allow" never covers a later payment) when a person will answer, and `block` otherwise. If 4eyes ever errors, Hermes fails closed and blocks the call. |
 | `ctx.register_command("4eyes")` | Human-only approvals and settings. |
 | `ctx.register_tool` | The two read-only tools. |
 | `dashboard/plugin_api.py` + `desktop/plugin.js` | The Desktop pane and chip, through `ctx.rest` and `plugin.4eyes.*` events. |
+
+## What 4eyes cannot see
+
+4eyes reads tool calls. It is a second pair of eyes, not a sandbox, so be clear about its edges:
+
+- **Script files.** It sees code passed to `execute_code` or typed inline in a shell. A script the agent
+  writes to disk and then runs (`python send.py`) is out of sight. Don't keep private keys where the
+  agent's shell can read them; use a wallet plugin, which 4eyes does see.
+- **Self-protection is a tripwire.** The checks that stop the agent changing 4eyes match what a call
+  says (paths, commands, the pane's URL, with URL-encoding and stray quotes removed). They stop an
+  agent that has been talked into it; they will not stop every possible disguise. Hermes' own approval
+  prompts for dangerous commands and config edits are the second layer.
+- **Amounts in base units.** If a wallet tool takes `50000000` to mean 50 USDC, 4eyes reads fifty
+  million and holds it. That errs on the safe side, but you will be asked more often.
+- **Solana transactions** are not decoded. A pre-built one is held as unreadable.
 
 ## Disclosure
 
@@ -146,13 +174,17 @@ pretend wallet tools above (hidden otherwise).
   names. This stays in memory and is never sent anywhere.
 - **Local storage:** payees, limits, settings, holds and the last 200 decisions (summaries with
   shortened addresses) are kept as JSON in `<HERMES_HOME>/plugin-data/4eyes/`.
+- **One Hermes internal.** To use Hermes' approval prompt only when a person will answer, 4eyes reads
+  `tools.approval` (approval mode, YOLO, who is present). `hermes plugins validate` notes this import.
+  If a Hermes release changes it, 4eyes falls back to blocking and `/4eyes approve`.
 - No shell commands, background processes, reads outside its own data folder, or self-update.
 
 ## Development
 
 ```bash
 git clone https://github.com/Mhiah/4eyes && cd 4eyes
-python -m pytest -c tests/pytest.ini --rootdir tests tests      # attacks + Hermes integration tests
+python -m pytest -c tests/pytest.ini --rootdir tests tests      # attacks; Hermes tests skip without Hermes
+PYTHONPATH=../hermes-agent python -m pytest -c tests/pytest.ini --rootdir tests tests   # with a Hermes checkout
 hermes plugins validate . --install-deps                         # the catalog's own checks
 ```
 
